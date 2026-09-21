@@ -1,0 +1,18 @@
+[project]
+name = "quant-backtester"
+version = "0.1.0"
+description = "A pluggable backtesting engine with statistically-validated strategy evaluation"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "numpy",
+    "yfinance",
+    "scikit-learn",
+    "scipy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
