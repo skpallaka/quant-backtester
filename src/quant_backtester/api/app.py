@@ -1,9 +1,10 @@
 """Flask REST API for running backtests and reading back results.
 
-Synchronous for now: POST /backtests blocks until the backtest finishes,
-which is fine for a request that takes a few hundred milliseconds against
-a couple hundred bars, and is exactly the problem Day 11 exists to fix
-once backtests take minutes over years of data.
+POST /backtests enqueues a Celery task and returns immediately with
+status='pending' -- the actual backtest runs on a worker process, not the
+request thread. This is the fix for backtests that take minutes: an HTTP
+request can't sit open that long, but a queued job can run as long as it
+needs to while the client polls GET /backtests/:id for status.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from flask import Flask, jsonify, request
 from sqlalchemy import text
 
 from quant_backtester.api.registry import available_strategies
-from quant_backtester.api.runner import run_backtest
+from quant_backtester.api.tasks import run_backtest_task
 from quant_backtester.data.loader import get_engine
 
 REQUIRED_FIELDS = {"ticker", "start", "end", "strategy"}
@@ -39,6 +40,9 @@ def create_app() -> Flask:
         if missing:
             return jsonify({"error": f"missing required fields: {sorted(missing)}"}), 400
 
+        if payload["strategy"] not in available_strategies():
+            return jsonify({"error": f"Unknown strategy '{payload['strategy']}'. Available: {available_strategies()}"}), 400
+
         run_id = str(uuid.uuid4())
         engine = get_engine()
 
@@ -49,7 +53,7 @@ def create_app() -> Flask:
                         (id, ticker, strategy, strategy_params, start_date, end_date,
                          initial_cash, cost_bps, status)
                     VALUES
-                        (:id, :ticker, :strategy, :params, :start, :end, :cash, :cost_bps, 'running')
+                        (:id, :ticker, :strategy, :params, :start, :end, :cash, :cost_bps, 'pending')
                 """),
                 {
                     "id": run_id,
@@ -63,29 +67,9 @@ def create_app() -> Flask:
                 },
             )
 
-        try:
-            result = run_backtest(payload)
-        except Exception as exc:
-            with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                        UPDATE backtest_runs SET status = 'failed', error = :err, completed_at = now()
-                        WHERE id = :id
-                    """),
-                    {"err": str(exc), "id": run_id},
-                )
-            return jsonify({"id": run_id, "status": "failed", "error": str(exc)}), 400
+        run_backtest_task.delay(run_id, payload)
 
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    UPDATE backtest_runs SET status = 'completed', result = :result, completed_at = now()
-                    WHERE id = :id
-                """),
-                {"result": json.dumps(result), "id": run_id},
-            )
-
-        return jsonify({"id": run_id, "status": "completed", **result}), 201
+        return jsonify({"id": run_id, "status": "pending"}), 202
 
     @app.get("/backtests/<run_id>")
     def get_backtest(run_id: str):

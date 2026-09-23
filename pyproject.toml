@@ -12,6 +12,8 @@ dependencies = [
     "sqlalchemy",
     "psycopg[binary]",
     "flask",
+    "celery",
+    "redis",
 ]
 
 [project.optional-dependencies]
