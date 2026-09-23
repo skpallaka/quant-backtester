@@ -9,14 +9,17 @@ regression baseline).
 
 ```
 src/quant_backtester/
-  data/loader.py        # yfinance fetch + SQLite cache (cache-first, upserts missing dates)
+  data/loader.py        # yfinance fetch + Postgres cache (cache-first, upserts missing dates)
   engine/strategy.py     # Strategy ABC -- engine knows nothing about strategy internals
   engine/backtest.py      # core day-by-day loop, transaction costs, no-lookahead execution
   engine/validation.py    # time-based (non-shuffled) train/test split
   metrics/metrics.py       # Sharpe ratio, max drawdown, bootstrap confidence intervals
   strategies/               # moving_average, rsi, momentum, mean_reversion, logistic
-tests/                       # pytest suite (37 tests) covering all of the above
-scripts/run_backtest.py       # end-to-end example: fetch -> split -> backtest -> report
+migrations/                   # versioned SQL schema, applied by scripts/migrate.py
+tests/                          # pytest suite (40 tests) covering all of the above
+scripts/run_backtest.py          # end-to-end example: fetch -> split -> backtest -> report
+scripts/migrate.py                # idempotent schema migration runner (local Postgres or RDS)
+docker-compose.yml                 # local Postgres for development
 ```
 
 ## Setup
@@ -25,7 +28,16 @@ scripts/run_backtest.py       # end-to-end example: fetch -> split -> backtest -
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+
+# start Postgres and apply the schema
+docker compose up -d postgres
+cp .env.example .env   # edit DATABASE_URL if not using the default local Postgres
+python scripts/migrate.py
 ```
+
+`DATABASE_URL` defaults to `postgresql+psycopg://quant:quant@localhost:5432/quant_backtester`
+(matching docker-compose.yml) if unset -- override it to point at RDS or
+anything else Postgres-compatible.
 
 ## Run the example
 
@@ -38,6 +50,10 @@ python scripts/run_backtest.py SPY
 ```bash
 pytest tests/ -v
 ```
+
+Most tests run against synthetic data and need nothing running. A handful
+in `test_data_loader.py` exercise the real Postgres cache and are skipped
+automatically if `docker compose up -d postgres` hasn't been run.
 
 ## Design notes
 
@@ -62,6 +78,15 @@ against.
 notional, deducted from cash at fill time -- so strategies that flip
 position constantly get penalized realistically instead of trading for
 free.
+
+**Postgres over SQLite.** The cache started on SQLite because it needed
+zero setup for a single-machine, single-process prototype. Postgres is the
+swap once the plan includes a server process handling concurrent requests
+(Day 10) and background workers writing results (Day 11) -- SQLite's
+single-writer model doesn't hold up once more than one process touches the
+database at a time. Schema changes go through `migrations/*.sql` +
+`scripts/migrate.py` rather than ad hoc `CREATE TABLE IF NOT EXISTS` calls,
+so the same migration path works against local Docker Postgres and RDS.
 
 **Bootstrap confidence intervals.** `metrics.bootstrap_confidence_interval`
 resamples the observed return series with replacement (default 1,000

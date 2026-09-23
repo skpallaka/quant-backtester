@@ -9,6 +9,8 @@ dependencies = [
     "yfinance",
     "scikit-learn",
     "scipy",
+    "sqlalchemy",
+    "psycopg[binary]",
 ]
 
 [project.optional-dependencies]

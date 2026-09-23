@@ -1,70 +1,77 @@
-"""OHLCV data access: fetch from Yahoo Finance, cache to SQLite.
+"""OHLCV data access: fetch from Yahoo Finance, cache to Postgres.
 
 The cache is keyed on (ticker, date). Repeated calls for a range that's
-already cached hit SQLite only; anything missing is pulled from yfinance
-and upserted before returning.
+already cached hit Postgres only; anything missing is pulled from yfinance
+and upserted before returning. Schema lives in migrations/ and is applied
+via scripts/migrate.py -- this module assumes the `ohlcv` table already
+exists (same requirement whether pointed at local Docker Postgres or RDS).
 """
 
 from __future__ import annotations
 
-import sqlite3
-from pathlib import Path
+import os
 
 import pandas as pd
+from sqlalchemy import Engine, create_engine, text
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[3] / "data_cache" / "market_data.db"
+DEFAULT_DATABASE_URL = "postgresql+psycopg://quant:quant@localhost:5432/quant_backtester"
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS ohlcv (
-    ticker TEXT NOT NULL,
-    date TEXT NOT NULL,
-    open REAL NOT NULL,
-    high REAL NOT NULL,
-    low REAL NOT NULL,
-    close REAL NOT NULL,
-    volume INTEGER NOT NULL,
-    PRIMARY KEY (ticker, date)
-);
-"""
+_engine: Engine | None = None
 
 
-def _connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
-    conn.execute(_SCHEMA)
-    return conn
+def get_database_url() -> str:
+    return os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 
-def _read_cached(conn: sqlite3.Connection, ticker: str, start: str, end: str) -> pd.DataFrame:
-    query = """
+def get_engine() -> Engine:
+    """Module-level engine, lazily created and reused across calls."""
+    global _engine
+    if _engine is None:
+        _engine = create_engine(get_database_url())
+    return _engine
+
+
+def _read_cached(engine: Engine, ticker: str, start: str, end: str) -> pd.DataFrame:
+    query = text("""
         SELECT date, open, high, low, close, volume
         FROM ohlcv
-        WHERE ticker = ? AND date >= ? AND date < ?
+        WHERE ticker = :ticker AND date >= :start AND date < :end
         ORDER BY date ASC
-    """
-    df = pd.read_sql_query(query, conn, params=(ticker, start, end), parse_dates=["date"])
+    """)
+    df = pd.read_sql_query(
+        query, engine, params={"ticker": ticker, "start": start, "end": end}, parse_dates=["date"]
+    )
     return df.set_index("date")
 
 
-def _write_cache(conn: sqlite3.Connection, ticker: str, df: pd.DataFrame) -> None:
+def _write_cache(engine: Engine, ticker: str, df: pd.DataFrame) -> None:
     if df.empty:
         return
+
     rows = [
-        (ticker, idx.strftime("%Y-%m-%d"), float(row["open"]), float(row["high"]), float(row["low"]),
-         float(row["close"]), int(row["volume"]))
+        {
+            "ticker": ticker,
+            "date": idx.strftime("%Y-%m-%d"),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": int(row["volume"]),
+        }
         for idx, row in df.iterrows()
     ]
-    conn.executemany(
-        """
-        INSERT INTO ohlcv (ticker, date, open, high, low, close, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(ticker, date) DO UPDATE SET
-            open=excluded.open, high=excluded.high, low=excluded.low,
-            close=excluded.close, volume=excluded.volume
-        """,
-        rows,
-    )
-    conn.commit()
+
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO ohlcv (ticker, date, open, high, low, close, volume)
+                VALUES (:ticker, :date, :open, :high, :low, :close, :volume)
+                ON CONFLICT (ticker, date) DO UPDATE SET
+                    open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low,
+                    close = EXCLUDED.close, volume = EXCLUDED.volume
+            """),
+            rows,
+        )
 
 
 def _fetch_from_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -82,23 +89,23 @@ def _fetch_from_yfinance(ticker: str, start: str, end: str) -> pd.DataFrame:
     return raw
 
 
-def fetch_ohlcv(ticker: str, start: str, end: str, db_path: Path = DEFAULT_DB_PATH) -> pd.DataFrame:
+def fetch_ohlcv(ticker: str, start: str, end: str, engine: Engine | None = None) -> pd.DataFrame:
     """Return daily OHLCV for `ticker` in [start, end), cache-first.
 
-    Dates missing from the local SQLite cache are pulled from Yahoo Finance
-    and persisted before the combined frame is returned.
+    Dates missing from the Postgres cache are pulled from Yahoo Finance and
+    persisted before the combined frame is returned. Pass `engine` to target
+    a specific database (tests, RDS); defaults to `get_engine()`, which
+    reads DATABASE_URL.
     """
-    conn = _connect(db_path)
-    try:
-        cached = _read_cached(conn, ticker, start, end)
-        expected_days = pd.bdate_range(start, end, inclusive="left")
-        missing = expected_days.difference(cached.index)
+    engine = engine or get_engine()
 
-        if len(missing) > 0:
-            fresh = _fetch_from_yfinance(ticker, start, end)
-            _write_cache(conn, ticker, fresh)
-            cached = _read_cached(conn, ticker, start, end)
+    cached = _read_cached(engine, ticker, start, end)
+    expected_days = pd.bdate_range(start, end, inclusive="left")
+    missing = expected_days.difference(cached.index)
 
-        return cached
-    finally:
-        conn.close()
+    if len(missing) > 0:
+        fresh = _fetch_from_yfinance(ticker, start, end)
+        _write_cache(engine, ticker, fresh)
+        cached = _read_cached(engine, ticker, start, end)
+
+    return cached
