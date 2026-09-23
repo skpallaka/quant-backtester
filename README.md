@@ -25,11 +25,15 @@ src/quant_backtester/
   api/runner.py                 # pure fetch -> backtest -> metrics function, shared by API and worker
   api/registry.py                 # strategy name -> class, for the API's strategy_params contract
   logging_config.py                 # JSON log formatter -- same stdout output CloudWatch will later ingest
-migrations/                        # versioned SQL schema, applied by scripts/migrate.py
-tests/                               # pytest suite (49 tests) covering all of the above
-scripts/run_backtest.py               # end-to-end example: fetch -> split -> backtest -> report
-scripts/migrate.py                     # idempotent schema migration runner (local Postgres or RDS)
-docker-compose.yml                      # local Postgres + Redis for development
+  tickers.py                          # shared 34-ticker universe (9 sectors), used by backtest grid + Spark job
+migrations/                            # versioned SQL schema, applied by scripts/migrate.py
+tests/                                   # pytest suite (49 tests) covering all of the above
+scripts/run_backtest.py                   # end-to-end example: fetch -> split -> backtest -> report
+scripts/run_backtest_grid.py                # strategy backtests across a diversified ticker set
+scripts/fetch_universe.py                     # populate Postgres for the full ticker universe
+scripts/spark_analysis.py                       # PySpark: JDBC read, window functions, groupBy aggregation
+scripts/migrate.py                                # idempotent schema migration runner (local Postgres or RDS)
+docker-compose.yml                                  # local Postgres + Redis for development
 ```
 
 ## Setup
@@ -54,6 +58,23 @@ if unset -- override `DATABASE_URL` to point at RDS once that exists.
 ```bash
 python scripts/run_backtest.py SPY
 ```
+
+## Run the Spark analysis
+
+Aggregates daily returns and rolling volatility across a 34-ticker, 9-sector
+universe (`quant_backtester.tickers.TICKERS`) via PySpark -- window
+functions for per-ticker rolling volatility, `groupBy().agg()` for
+per-ticker and per-sector summaries. Needs a JDK 17+ (PySpark 4.x doesn't
+run on Java 8):
+
+```bash
+brew install openjdk@17
+python scripts/fetch_universe.py   # populate Postgres for all 34 tickers (one-time)
+JAVA_HOME=$(brew --prefix openjdk@17) python scripts/spark_analysis.py
+```
+
+Writes `results/spark_per_ticker_summary.csv` and
+`results/spark_per_sector_summary.csv`.
 
 ## Run the API
 
@@ -100,6 +121,23 @@ read wiring -- the real async path was verified manually against a running
 worker + Redis.
 
 ## Design notes
+
+**PySpark over pandas for the cross-sectional analysis.** The per-ticker
+strategy backtests (`run_backtest_grid.py`) stay pandas -- each ticker's
+walk-forward backtest is inherently sequential (bar-by-bar, position
+depends on prior state), so there's no batch-parallel structure for Spark
+to exploit there. The *aggregation* layer is different: computing rolling
+volatility and return stats across 34 independent tickers is an
+embarrassingly parallel groupBy, which is exactly Spark's model --
+`spark_analysis.py` reads the `ohlcv` table via JDBC (Spark does the
+partitioned read, not a Python loop), computes daily returns and a 30-day
+rolling volatility per ticker with a `Window.partitionBy("ticker")`
+function, then rolls up to per-ticker and per-sector summaries via
+`groupBy().agg()`. At 34 tickers this runs on a single local-mode JVM in
+seconds; the same code scales to thousands of tickers on a real cluster
+without changes to the transformation logic, which is the actual point of
+using Spark's DataFrame API instead of a pandas loop -- the code doesn't
+change shape when the data does.
 
 **Engine/strategy separation.** `BacktestEngine` only ever calls
 `strategy.generate_signal(history)`; it has no knowledge of moving
