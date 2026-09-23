@@ -3,7 +3,12 @@
 A small, from-scratch backtesting engine: data layer, a pluggable strategy
 interface, statistically-honest performance metrics, and five strategies
 (moving average crossover, RSI, momentum, mean reversion, logistic
-regression baseline).
+regression baseline) -- backed by a Postgres-backed Flask API with async
+backtest execution via Celery/Redis.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a diagram of the full
+system (what's built vs. what's still planned on AWS) and the reasoning
+behind each major decision.
 
 ## Layout
 
