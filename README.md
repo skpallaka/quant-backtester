@@ -15,11 +15,14 @@ src/quant_backtester/
   engine/validation.py    # time-based (non-shuffled) train/test split
   metrics/metrics.py       # Sharpe ratio, max drawdown, bootstrap confidence intervals
   strategies/               # moving_average, rsi, momentum, mean_reversion, logistic
-migrations/                   # versioned SQL schema, applied by scripts/migrate.py
-tests/                          # pytest suite (40 tests) covering all of the above
-scripts/run_backtest.py          # end-to-end example: fetch -> split -> backtest -> report
-scripts/migrate.py                # idempotent schema migration runner (local Postgres or RDS)
-docker-compose.yml                 # local Postgres for development
+  api/app.py                # Flask REST API: run backtests, read back results
+  api/runner.py               # pure fetch -> backtest -> metrics function, shared by API and (later) workers
+  api/registry.py               # strategy name -> class, for the API's strategy_params contract
+migrations/                      # versioned SQL schema, applied by scripts/migrate.py
+tests/                             # pytest suite (47 tests) covering all of the above
+scripts/run_backtest.py             # end-to-end example: fetch -> split -> backtest -> report
+scripts/migrate.py                   # idempotent schema migration runner (local Postgres or RDS)
+docker-compose.yml                    # local Postgres for development
 ```
 
 ## Setup
@@ -44,6 +47,29 @@ anything else Postgres-compatible.
 ```bash
 python scripts/run_backtest.py SPY
 ```
+
+## Run the API
+
+```bash
+export FLASK_APP=quant_backtester.api.app:app
+flask run --port 5050
+```
+
+```bash
+curl -X POST localhost:5050/backtests -H "Content-Type: application/json" -d '{
+  "ticker": "SPY", "start": "2023-01-01", "end": "2023-06-01",
+  "strategy": "moving_average_crossover", "strategy_params": {"short_window": 10, "long_window": 30}
+}'
+# -> {"id": "...", "status": "completed", "metrics": {...}, "equity_curve": [...]}
+
+curl localhost:5050/backtests/<id>     # fetch a stored run
+curl localhost:5050/backtests          # list recent runs
+curl localhost:5050/strategies         # what strategy names are valid
+```
+
+Requests block until the backtest finishes -- fine for the date ranges
+above, not fine once a request means years of data and thousands of
+bootstrap resamples. That's what Day 11 (Redis + Celery) exists to fix.
 
 ## Run tests
 
