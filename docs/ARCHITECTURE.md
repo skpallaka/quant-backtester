@@ -1,10 +1,14 @@
 # Architecture
 
-This documents what's actually built and running (a local Docker Compose
-stack: Flask API, Celery worker, Postgres, Redis, CI in GitHub Actions)
-versus what's designed for but not yet deployed (RDS, ECS, CloudWatch
-alarms, auto-deploy). The diagram below is honest about the split --
-dashed lines and the "planned" subgraph are nothing that exists yet.
+This documents what's actually built and running -- a local stack (Flask
+API, Celery worker, Postgres, Redis) runnable either via Docker Compose
+(day-to-day dev) or as a Kubernetes deployment (verified locally via
+kind: Deployments, Services, a migration Job, load-balanced replicas,
+self-healing), plus CI in GitHub Actions and a PySpark job for
+cross-sectional analysis -- versus what's designed for but not yet
+deployed (RDS, ECS/EKS, CloudWatch alarms, auto-deploy, all of which need
+an actual AWS account). The diagram is honest about the split -- dashed
+lines and the "planned" subgraph are nothing that exists yet.
 
 ## Diagram
 
@@ -12,17 +16,18 @@ dashed lines and the "planned" subgraph are nothing that exists yet.
 flowchart LR
     C[Client<br/>curl / browser]
 
-    subgraph today["Built today — local Docker Compose"]
-        API[Flask API]
+    subgraph today["Built today — local (Docker Compose or Kubernetes/kind)"]
+        API[Flask API<br/>2 replicas on k8s]
         PG[("Postgres<br/>ohlcv, backtest_runs")]
         RQ[("Redis<br/>broker + result backend")]
-        W[Celery worker]
+        W[Celery worker<br/>2 replicas on k8s]
         CI["GitHub Actions CI<br/>pytest vs Postgres+Redis"]
+        SPARK["PySpark job<br/>JDBC read, window fns, groupBy"]
     end
 
-    subgraph planned["Planned — AWS (Days 9/10/14, not yet built)"]
+    subgraph planned["Planned — AWS (Day 9, not yet built)"]
         RDS[("RDS Postgres")]
-        ECS["ECS service<br/>API + worker tasks"]
+        EKS["EKS or ECS<br/>same containers, managed cluster"]
         CW["CloudWatch Logs<br/>+ alarms"]
         CD["CI/CD: deploy job<br/>on merge to main"]
     end
@@ -35,11 +40,12 @@ flowchart LR
     W -->|"fetch OHLCV, run engine"| PG
     W -->|"write result"| PG
     API -->|"read status/result"| PG
+    SPARK -->|"JDBC read"| PG
 
     CI -.->|"needs: test, gated on AWS creds"| CD
-    CD -.-> ECS
-    ECS -.-> RDS
-    ECS -.-> CW
+    CD -.-> EKS
+    EKS -.-> RDS
+    EKS -.-> CW
     PG -.->|"same schema, same migrations"| RDS
 ```
 
@@ -102,15 +108,40 @@ gated on `needs: test`, using `aws-actions/configure-aws-credentials`,
 `docker build` + push to ECR, then `aws ecs update-service`. Nothing about
 the existing `test` job changes.
 
-**What AWS would replace, concretely:**
+**Kubernetes orchestration, verified locally via kind (new).** The same
+containers `docker compose` runs also run as Kubernetes Deployments/
+Services (`k8s/`), on a local cluster created with `kind` (Kubernetes-
+in-Docker -- nodes are just containers on the same Docker daemon
+everything else uses, no separate VM). This was applied and tested live,
+not just written:
+- `kubectl apply -f k8s/` brought up Postgres, Redis, a one-shot
+  migration `Job`, and 2 replicas each of the API and worker as
+  Deployments.
+- Confirmed the API `Service` load-balances across both API pods (pod
+  logs show each pod serving different requests) and that the two worker
+  pods compete for jobs off the same Redis queue -- only one worker's
+  logs show `backtest_started`/`backtest_completed` for a given job, the
+  standard competing-consumers pattern, now actually running across
+  separate pods instead of one process.
+- Deleted a running worker pod (`kubectl delete pod worker-...`) and
+  watched the Deployment controller replace it automatically within
+  seconds, with zero supervisor code of our own -- the concrete
+  difference between orchestration and `docker run`.
+
+`docker compose` remains the day-to-day dev loop (simpler, no cluster to
+manage) -- the k8s path exists to demonstrate the actual primitives
+(replica reconciliation, Service load-balancing, Jobs) against a real
+cluster, matching what the eventual AWS deployment (EKS, or ECS if that
+path is chosen instead) would need.
+
+**What AWS would still add, concretely:**
 
 | Local today | AWS (planned) |
 |---|---|
-| `docker compose up -d postgres` | RDS Postgres instance |
-| `docker compose up -d redis` | ElastiCache Redis (or keep Redis on the ECS task) |
-| `flask run` | ECS service running the Flask container |
-| `celery worker --pool=solo` | ECS service running the worker container |
-| JSON logs on stdout, read from a terminal | Same stdout, shipped to CloudWatch Logs by awslogs driver |
+| `docker compose up -d postgres` or the k8s `postgres` Deployment | RDS Postgres instance |
+| `docker compose up -d redis` or the k8s `redis` Deployment | ElastiCache Redis (or keep Redis in-cluster) |
+| `kind` cluster (local, ephemeral) | EKS (managed control plane) or ECS |
+| JSON logs on stdout, read via `kubectl logs` | Same stdout, shipped to CloudWatch Logs by the cluster's log driver |
 | Manual `git push` | GitHub Actions deploy job on merge to main |
 
 ## Current state
@@ -126,6 +157,8 @@ the existing `test` job changes.
 | 13 | CI | Done, green on GitHub Actions. CD half blocked on Day 9/10 |
 | 14 | Monitoring | Structured logging done; CloudWatch alarms blocked on Day 9 |
 | 15 | Docs | This file |
+| -- | PySpark cross-sectional analysis | Done, verified live -- 34 tickers/9 sectors via JDBC + window functions |
+| -- | Kubernetes orchestration | Done, verified live locally via kind -- not EKS/ECS |
 | 16 | Review | Next |
 
 49 tests pass locally and in CI. The repo is at

@@ -34,6 +34,8 @@ scripts/fetch_universe.py                     # populate Postgres for the full t
 scripts/spark_analysis.py                       # PySpark: JDBC read, window functions, groupBy aggregation
 scripts/migrate.py                                # idempotent schema migration runner (local Postgres or RDS)
 docker-compose.yml                                  # local Postgres + Redis for development
+Dockerfile                                            # app image, shared by the API and worker containers
+k8s/                                                    # Deployments/Services/ConfigMap/Secret/Job -- verified locally via kind
 ```
 
 ## Setup
@@ -106,6 +108,58 @@ curl localhost:5050/backtests          # list recent runs
 curl localhost:5050/strategies         # what strategy names are valid
 ```
 
+## Run on Kubernetes
+
+The same API/worker/Postgres/Redis stack, orchestrated declaratively
+instead of `docker compose up`/`docker run`. Verified locally with
+[kind](https://kind.sigs.k8s.io/) (Kubernetes-in-Docker, runs on the same
+Docker daemon as everything else in this repo -- no separate VM):
+
+```bash
+brew install kind kubectl
+docker build -t quant-backtester:latest .
+kind create cluster --name quant-backtester
+kind load docker-image quant-backtester:latest --name quant-backtester
+
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -f k8s/01-config.yaml
+kubectl apply -f k8s/02-postgres.yaml
+kubectl apply -f k8s/03-redis.yaml
+kubectl -n quant-backtester wait --for=condition=ready pod -l app=postgres --timeout=90s
+kubectl -n quant-backtester wait --for=condition=ready pod -l app=redis --timeout=60s
+
+kubectl apply -f k8s/04-migrate-job.yaml
+kubectl -n quant-backtester wait --for=condition=complete job/migrate --timeout=60s
+
+kubectl apply -f k8s/05-api.yaml
+kubectl apply -f k8s/06-worker.yaml
+
+kubectl -n quant-backtester port-forward svc/api 5051:80
+# -> curl localhost:5051/backtests, same API as before
+```
+
+What this buys over `docker compose`, concretely (not hypothetically --
+all verified live in this repo):
+
+- **Load-balanced replicas.** `k8s/05-api.yaml` and `06-worker.yaml` both
+  run `replicas: 2`. The API `Service` load-balances requests across both
+  pods (confirmed via pod logs -- each pod served different requests); the
+  two worker pods both connect to Redis and only one of them ever claims
+  a given job (confirmed via pod logs -- one worker logged
+  `backtest_started`/`backtest_completed`, the other didn't), which is
+  Celery's normal competing-consumers behavior, now actually running
+  across multiple pods instead of one process.
+- **Self-healing.** Deleting a worker pod (`kubectl delete pod
+  worker-...`) gets it replaced automatically within seconds -- the
+  Deployment controller continuously reconciles actual pod count against
+  the declared `replicas: 2`, with no supervisor script of our own.
+- **Declarative, versioned infra.** `kubectl apply -f k8s/` is idempotent
+  and the desired state lives in git, same principle as the SQL
+  migrations -- versus a sequence of imperative `docker run` commands
+  that only exist as shell history.
+
+Teardown: `kind delete cluster --name quant-backtester`.
+
 ## Run tests
 
 ```bash
@@ -121,6 +175,19 @@ read wiring -- the real async path was verified manually against a running
 worker + Redis.
 
 ## Design notes
+
+**Kubernetes over `docker compose` for orchestration.** Day-to-day local
+dev still uses `docker compose up -d postgres redis` -- it's simpler and
+that's the right tool when there's no orchestration problem to solve
+(fixed single instances, no load balancing, no self-healing needed). The
+`k8s/` manifests exist to demonstrate the actual orchestration
+primitives -- Deployments reconciling replica count, a Service
+load-balancing across pods, a Job for one-shot migration -- against a
+real (if local, via kind) cluster, not just written and never run. This
+is the same relationship AWS RDS has to local Postgres: the local
+Docker-Compose path is genuinely simpler for solo development, and the
+orchestrated path is what the same containers need once there's more
+than one of anything.
 
 **PySpark over pandas for the cross-sectional analysis.** The per-ticker
 strategy backtests (`run_backtest_grid.py`) stay pandas -- each ticker's

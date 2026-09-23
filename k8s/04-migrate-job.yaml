@@ -1,0 +1,17 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+  namespace: quant-backtester
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: quant-backtester:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "scripts/migrate.py"]
+          envFrom:
+            - configMapRef: {name: app-config}
