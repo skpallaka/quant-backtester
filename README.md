@@ -19,6 +19,7 @@ src/quant_backtester/
   api/tasks.py                # Celery app + the async backtest task (runs on a worker, not the request thread)
   api/runner.py                 # pure fetch -> backtest -> metrics function, shared by API and worker
   api/registry.py                 # strategy name -> class, for the API's strategy_params contract
+  logging_config.py                 # JSON log formatter -- same stdout output CloudWatch will later ingest
 migrations/                        # versioned SQL schema, applied by scripts/migrate.py
 tests/                               # pytest suite (49 tests) covering all of the above
 scripts/run_backtest.py               # end-to-end example: fetch -> split -> backtest -> report
@@ -136,6 +137,27 @@ process and writes the result back to the same `backtest_runs` row a
 client is already polling via `GET /backtests/:id`. `api/runner.py` is the
 same pure function either way -- the only thing that changed between Day
 10 and Day 11 is who calls it and when.
+
+**Structured logging.** `logging_config.py` formats every log line as JSON
+and both `api/app.py` (HTTP requests) and `api/tasks.py` (job lifecycle:
+`backtest_started`/`backtest_completed`/`backtest_failed`, each with
+`run_id`, timing, and outcome) log through it. Locally that's just
+readable JSON on stdout. Once this runs on ECS, the same stdout gets
+shipped to CloudWatch Logs by the awslogs driver with zero code changes --
+"how would you know if this broke at 3am" becomes: a CloudWatch alarm on
+the rate of `backtest_failed` events (or on `http_request` entries with
+`status >= 500`) pages on-call, and Logs Insights can filter straight to
+`{ $.run_id = "..." }` to pull the exact failure instead of grepping raw
+text. That alarm wiring is Day 14/AWS work not yet done -- what exists
+today is the structured logs it would consume.
+
+One gotcha worth knowing: Celery's worker replaces the root logger's
+handlers on startup (`worker_hijack_root_logger`), so calling
+`configure_logging()` at import time in `tasks.py` gets silently
+discarded the moment the worker boots. The fix is connecting to Celery's
+`setup_logging` signal instead, which runs after Celery's own logging
+setup and opts out of it -- see the `_configure_worker_logging` receiver
+in `api/tasks.py`.
 
 **Bootstrap confidence intervals.** `metrics.bootstrap_confidence_interval`
 resamples the observed return series with replacement (default 1,000
