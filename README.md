@@ -230,8 +230,8 @@ free.
 
 **Postgres over SQLite.** The cache started on SQLite because it needed
 zero setup for a single-machine, single-process prototype. Postgres is the
-swap once the plan includes a server process handling concurrent requests
-(Day 10) and background workers writing results (Day 11) -- SQLite's
+swap once the system includes a server process handling concurrent requests
+and background workers writing results -- SQLite's
 single-writer model doesn't hold up once more than one process touches the
 database at a time. Schema changes go through `migrations/*.sql` +
 `scripts/migrate.py` rather than ad hoc `CREATE TABLE IF NOT EXISTS` calls,
@@ -245,8 +245,8 @@ any reasonable HTTP timeout. Now the route does three cheap things
 `api/tasks.py`'s Celery task does the actual work on a separate worker
 process and writes the result back to the same `backtest_runs` row a
 client is already polling via `GET /backtests/:id`. `api/runner.py` is the
-same pure function either way -- the only thing that changed between Day
-10 and Day 11 is who calls it and when.
+same pure function either way -- the only thing that changed between the
+sync and async versions is who calls it and when.
 
 **Structured logging.** `logging_config.py` formats every log line as JSON
 and both `api/app.py` (HTTP requests) and `api/tasks.py` (job lifecycle:
@@ -258,8 +258,8 @@ shipped to CloudWatch Logs by the awslogs driver with zero code changes --
 the rate of `backtest_failed` events (or on `http_request` entries with
 `status >= 500`) pages on-call, and Logs Insights can filter straight to
 `{ $.run_id = "..." }` to pull the exact failure instead of grepping raw
-text. That alarm wiring is Day 14/AWS work not yet done -- what exists
-today is the structured logs it would consume.
+text. That alarm wiring needs an AWS deployment and isn't built yet --
+what exists today is the structured logs it would consume.
 
 One gotcha worth knowing: Celery's worker replaces the root logger's
 handlers on startup (`worker_hijack_root_logger`), so calling

@@ -1,8 +1,8 @@
 """Pure backtest execution: fetch data, run the engine, compute metrics.
 
 Deliberately has no DB side effects and no knowledge of Flask or Celery --
-it's called synchronously from the Flask route today (Day 10) and from a
-Celery task tomorrow (Day 11) without any change to this function.
+it can be called synchronously from a Flask route or from a Celery task
+without any change to this function.
 """
 
 from __future__ import annotations

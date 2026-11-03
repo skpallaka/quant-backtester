@@ -25,7 +25,7 @@ flowchart LR
         SPARK["PySpark job<br/>JDBC read, window fns, groupBy"]
     end
 
-    subgraph planned["Planned — AWS (Day 9, not yet built)"]
+    subgraph planned["Planned — AWS (not yet built)"]
         RDS[("RDS Postgres")]
         EKS["EKS or ECS<br/>same containers, managed cluster"]
         CW["CloudWatch Logs<br/>+ alarms"]
@@ -69,7 +69,7 @@ flowchart LR
 
 ## Decisions and tradeoffs
 
-**SQLite → Postgres (Day 8).** SQLite needed zero setup for a
+**SQLite → Postgres.** SQLite needed zero setup for a
 single-process prototype fetching one ticker at a time. It doesn't hold up
 once more than one process writes concurrently (a request thread and a
 worker process, in this design) -- SQLite serializes writers at the file
@@ -79,7 +79,7 @@ is what RDS offers anyway, so the swap now avoids a second migration
 later. Schema changes go through `migrations/*.sql` + `scripts/migrate.py`
 rather than ad hoc DDL, so the identical path applies to RDS.
 
-**Synchronous API → async via Celery/Redis (Days 10-11).** The first cut
+**Synchronous API → async via Celery/Redis.** The first cut
 of `POST /backtests` ran the backtest inline and returned the full result.
 That's fine for a few hundred bars; it falls over once a backtest spans
 years of data with a 1,000-resample bootstrap, which can take minutes --
@@ -90,7 +90,7 @@ let the client poll. Redis is both the message broker (queue) and result
 backend here; Postgres is still the source of truth for state, so a
 client never needs to know Celery is involved.
 
-**Structured JSON logs (Day 14).** Every log line -- HTTP requests, job
+**Structured JSON logs.** Every log line -- HTTP requests, job
 start/complete/fail -- is JSON on stdout. Locally that's just readable
 JSON; once this runs on ECS, the awslogs log driver ships the exact same
 stdout to CloudWatch Logs without any code change. The payoff is CloudWatch
@@ -99,16 +99,16 @@ Logs Insights queries on structured fields (`run_id`, `strategy`,
 a real signal (e.g. rate of `backtest_failed` events) instead of just "is
 the process alive."
 
-**CI without CD (Day 13).** GitHub Actions runs the full pytest suite
+**CI without CD.** GitHub Actions runs the full pytest suite
 against real Postgres + Redis service containers on every push --
-verified green in this repo. The auto-deploy half of Day 13 doesn't exist
+verified green in this repo. The auto-deploy half doesn't exist
 yet because there's no ECS/ECR target to deploy to and no AWS credentials
 configured as repo secrets. Adding it later is additive: a `deploy` job
 gated on `needs: test`, using `aws-actions/configure-aws-credentials`,
 `docker build` + push to ECR, then `aws ecs update-service`. Nothing about
 the existing `test` job changes.
 
-**Kubernetes orchestration, verified locally via kind (new).** The same
+**Kubernetes orchestration, verified locally via kind.** The same
 containers `docker compose` runs also run as Kubernetes Deployments/
 Services (`k8s/`), on a local cluster created with `kind` (Kubernetes-
 in-Docker -- nodes are just containers on the same Docker daemon
@@ -146,20 +146,17 @@ path is chosen instead) would need.
 
 ## Current state
 
-| Day | Item | Status |
-|---|---|---|
-| 1-7 | Data layer, backtest engine, metrics, strategies | Done, 37 tests |
-| 8 | Postgres migration | Done, verified live |
-| 9 | AWS account / RDS / IAM | Not started (needs your AWS credentials) |
-| 10 | Flask API | Done, verified live |
-| 11 | Redis + Celery async jobs | Done, verified live end-to-end |
-| 12 | Buffer | Used as a clean-restart regression check (nothing AWS to fix) |
-| 13 | CI | Done, green on GitHub Actions. CD half blocked on Day 9/10 |
-| 14 | Monitoring | Structured logging done; CloudWatch alarms blocked on Day 9 |
-| 15 | Docs | This file |
-| -- | PySpark cross-sectional analysis | Done, verified live -- 34 tickers/9 sectors via JDBC + window functions |
-| -- | Kubernetes orchestration | Done, verified live locally via kind -- not EKS/ECS |
-| 16 | Review | Next |
+| Component | Status |
+|---|---|
+| Data layer, backtest engine, metrics, strategies | Done |
+| Postgres migration | Done, verified live |
+| Flask API | Done, verified live |
+| Redis + Celery async jobs | Done, verified live end-to-end |
+| CI (GitHub Actions) | Done, green. CD not yet (no AWS target) |
+| Monitoring | Structured JSON logging done; CloudWatch alarms need AWS |
+| PySpark cross-sectional analysis | Done, verified live -- 34 tickers/9 sectors via JDBC + window functions |
+| Kubernetes orchestration | Done, verified live locally via kind -- not EKS/ECS |
+| AWS deployment (RDS, EKS/ECS) | Planned |
 
 49 tests pass locally and in CI. The repo is at
 [github.com/skpallaka/quant-backtester](https://github.com/skpallaka/quant-backtester).

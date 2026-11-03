@@ -1,6 +1,6 @@
 """Celery app + the async backtest task.
 
-Same logic Day 10's Flask route ran inline (call run_backtest, write the
+Same logic the original synchronous Flask route ran inline (call run_backtest, write the
 result to backtest_runs), just moved off the request thread. Redis is both
 the broker (queues the job) and the result backend (though we don't use
 Celery's result backend for reads -- the API reads status/result straight
